@@ -1,3 +1,0 @@
-K-omega SST turbulence model with curvature correction.
-Default branch (master) allow you to compile this model under openfoam171
-You can pull branch openfoam210 if you want to compile it using 2.1.0 OpenFOAM version.
