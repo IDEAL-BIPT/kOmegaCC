@@ -2,7 +2,7 @@
   =========                 |
   \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
    \\    /   O peration     |
-    \\  /    A nd           | Copyright (C) 1991-2010 OpenCFD Ltd.
+    \\  /    A nd           | Copyright (C) 2011 OpenFOAM Foundation
      \\/     M anipulation  |
 -------------------------------------------------------------------------------
 License
@@ -46,13 +46,13 @@ addToRunTimeSelectionTable(RASModel, kOmegaCC, dictionary);
 
 tmp<volScalarField> kOmegaCC::F1(const volScalarField& CDkOmega) const
 {
-    volScalarField CDkOmegaPlus = max
+    tmp<volScalarField> CDkOmegaPlus = max
     (
         CDkOmega,
         dimensionedScalar("1.0e-10", dimless/sqr(dimTime), 1.0e-10)
     );
 
-    volScalarField arg1 = min
+    tmp<volScalarField> arg1 = min
     (
         min
         (
@@ -71,7 +71,7 @@ tmp<volScalarField> kOmegaCC::F1(const volScalarField& CDkOmega) const
 
 tmp<volScalarField> kOmegaCC::F2() const
 {
-    volScalarField arg2 = min
+    tmp<volScalarField> arg2 = min
     (
         max
         (
@@ -92,10 +92,12 @@ kOmegaCC::kOmegaCC
     const volScalarField& rho,
     const volVectorField& U,
     const surfaceScalarField& phi,
-    const basicThermo& thermophysicalModel
+    const basicThermo& thermophysicalModel,
+    const word& turbulenceModelName,
+    const word& modelName
 )
 :
-    RASModel(typeName, rho, U, phi, thermophysicalModel),
+    RASModel(modelName, rho, U, phi, thermophysicalModel, turbulenceModelName),
 
     alphaK1_
     (
@@ -196,7 +198,7 @@ kOmegaCC::kOmegaCC
             0.31
         )
     ),
-    cr1_ // this class and next two was added by me (model coefficients)
+    cr1_ // this coefficient and next two was added by me (model coefficients)
     (
         dimensioned<scalar>::lookupOrAddToDict
         (
@@ -284,9 +286,18 @@ kOmegaCC::kOmegaCC
         autoCreateAlphat("alphat", mesh_)
     )
 {
-    bound(omega_, omega0_);
+    bound(k_, kMin_);
+    bound(omega_, omegaMin_);
 
-    mut_ = a1_*rho_*k_/max(a1_*omega_, F2()*sqrt(magSqr(symm(fvc::grad(U_)))));
+    mut_ =
+    (
+        a1_*rho_*k_
+      / max
+        (
+            a1_*omega_,
+            F2()*sqrt(2.0*magSqr(symm(fvc::grad(U_))))
+        )
+    );
     mut_.correctBoundaryConditions();
 
     alphat_ = mut_/Prt_;
@@ -297,6 +308,7 @@ kOmegaCC::kOmegaCC
 
 
 // * * * * * * * * * * * * * * * Member Functions  * * * * * * * * * * * * * //
+
 tmp<volSymmTensorField> kOmegaCC::R() const
 {
     return tmp<volSymmTensorField>
@@ -342,7 +354,7 @@ tmp<fvVectorMatrix> kOmegaCC::divDevRhoReff(volVectorField& U) const
 {
     return
     (
-      - fvm::laplacian(muEff(), U) - fvc::div(muEff()*dev2(fvc::grad(U)().T()))
+      - fvm::laplacian(muEff(), U) - fvc::div(muEff()*dev2(T(fvc::grad(U))))
     );
 }
 
@@ -380,7 +392,7 @@ void kOmegaCC::correct()
         // Re-calculate viscosity
         mut_ =
             a1_*rho_*k_
-           /max(a1_*omega_, F2()*sqrt(magSqr(symm(fvc::grad(U_)))));
+           /max(a1_*omega_, F2()*sqrt(2.0*magSqr(symm(fvc::grad(U_)))));
         mut_.correctBoundaryConditions();
 
         // Re-calculate thermal diffusivity
@@ -392,7 +404,7 @@ void kOmegaCC::correct()
 
     RASModel::correct();
 
-    volScalarField divU = fvc::div(phi_/fvc::interpolate(rho_));
+    volScalarField divU(fvc::div(phi_/fvc::interpolate(rho_)));
 
     if (mesh_.changing())
     {
@@ -409,14 +421,14 @@ void kOmegaCC::correct()
     tmp<volSymmTensorField> tSymm = symm(tgradU()); //Was added by me (symmetric part of the StressTensor)
     volScalarField symInnerProduct = 2. * tSymm() && tSymm();
     volScalarField asymInnerProduct = max(2. * tSkew() && tSkew(), dimensionedScalar("1e-16", dimensionSet(0, 0, -2, 0, 0), 1e-10) );
-    volScalarField S2 = magSqr(symm(tgradU()));
-    volScalarField GbyMu = (tgradU() && dev(twoSymm(tgradU())));
+    volScalarField S2(2*magSqr(symm(tgradU())));
+    volScalarField GbyMu((tgradU() && dev(twoSymm(tgradU()))));
     volScalarField rStar = sqrt(symInnerProduct/asymInnerProduct);
     volScalarField G("RASModel::G", mut_*GbyMu);
-        tgradU.clear();
+    tgradU.clear();
+    volScalarField D = sqrt(max(asymInnerProduct, 0.09*omega_*omega_)); //Possibly wrong. Don't know what Omega is used in equation
     // Update omega and G at the wall
     omega_.boundaryField().updateCoeffs();
-    volScalarField D = sqrt(max(asymInnerProduct, 0.09*omega_*omega_)); //Possibly wrong. Don't know what Omega is used in equation
     tmp<volSymmTensorField> divS = fvc::ddt(tSymm()) + fvc::div(surfaceScalarField("phiU",phi_/fvc::interpolate(rho_)), tSymm()); //Was added by me (Substantional Derivative of the StressTensor symmetric part)
     volScalarField rT = tSkew().component(0)*tSymm().component(0)*divS().component(0) +
                             tSkew().component(0)*tSymm().component(1)*divS().component(1) +
@@ -467,21 +479,22 @@ void kOmegaCC::correct()
     rTilda.clear();
     rT.clear();
     D.clear();
-    volScalarField CDkOmega =
-        (2*alphaOmega2_)*(fvc::grad(k_) & fvc::grad(omega_))/omega_;
+    volScalarField CDkOmega
+    (
+        (2*alphaOmega2_)*(fvc::grad(k_) & fvc::grad(omega_))/omega_
+    );
 
-    volScalarField F1 = this->F1(CDkOmega);
-    volScalarField rhoGammaF1 = rho_*gamma(F1);
+    volScalarField F1(this->F1(CDkOmega));
+    volScalarField rhoGammaF1(rho_*gamma(F1));
 
     // Turbulent frequency equation
     tmp<fvScalarMatrix> omegaEqn
     (
         fvm::ddt(rho_, omega_)
       + fvm::div(phi_, omega_)
-      
       - fvm::laplacian(DomegaEff(F1), omega_)
      ==
-        Frot*rhoGammaF1*GbyMu
+        rhoGammaF1*GbyMu*Frot
       - fvm::SuSp((2.0/3.0)*rhoGammaF1*divU, omega_)
       - fvm::Sp(rho_*beta(F1)*omega_, omega_)
       - fvm::SuSp
@@ -496,7 +509,7 @@ void kOmegaCC::correct()
     omegaEqn().boundaryManipulate(omega_.boundaryField());
 
     solve(omegaEqn);
-    bound(omega_, omega0_);
+    bound(omega_, omegaMin_);
 
     // Turbulent kinetic energy equation
     tmp<fvScalarMatrix> kEqn
@@ -505,14 +518,14 @@ void kOmegaCC::correct()
       + fvm::div(phi_, k_)
       - fvm::laplacian(DkEff(F1), k_)
      ==
-        Frot*min(G, (c1_*betaStar_)*rho_*k_*omega_)
+        min(G*Frot, (c1_*betaStar_)*rho_*k_*omega_)
       - fvm::SuSp(2.0/3.0*rho_*divU, k_)
       - fvm::Sp(rho_*betaStar_*omega_, k_)
     );
 
     kEqn().relax();
     solve(kEqn);
-    bound(k_, k0_);
+    bound(k_, kMin_);
 
 
     // Re-calculate viscosity
